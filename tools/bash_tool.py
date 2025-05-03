@@ -6,6 +6,9 @@ https://www.anthropic.com/engineering/swe-bench-sonnet.
 This tool allows the agent to execute bash commands in a controlled environment.
 It provides a simple interface for running shell commands and getting their output.
 It also supports command filters for transforming commands before execution.
+
+This implementation includes SWE-ReX integration for running commands in various
+deployment environments (local, Docker, AWS Fargate, Modal).
 """
 
 from pathlib import Path
@@ -16,6 +19,7 @@ from utils.common import (
     LLMTool,
     ToolImplOutput,
 )
+from utils.swerex_wrapper import SWEReXWrapper, DeploymentType
 import pexpect
 import re
 from abc import ABC, abstractmethod
@@ -209,6 +213,8 @@ Run commands in a bash shell
             workspace_root: Root directory of the workspace
             require_confirmation: Whether to require user confirmation before executing commands
             command_filters: Optional list of command filters to apply before execution
+            timeout: Command execution timeout in seconds
+            additional_banned_command_strs: Additional command strings to ban
         """
         super().__init__()
         self.workspace_root = workspace_root
@@ -344,6 +350,161 @@ Run commands in a bash shell
         return f"Executing bash command: {tool_input['command']}"
 
 
+class SWEReXBashTool(LLMTool):
+    """A tool for executing bash commands using SWE-ReX.
+
+    This tool uses SWE-ReX to run shell commands in various deployment environments
+    (local, Docker, AWS Fargate, Modal).
+    """
+
+    name = "bash"
+    description = """\
+Run commands in a bash shell
+* When invoking this tool, the contents of the \"command\" parameter does NOT need to be XML-escaped.
+* You don't have access to the internet via this tool.
+* You do have access to a mirror of common linux and python packages via apt and pip.
+* State is persistent across command calls and discussions with the user.
+* To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
+* Please avoid commands that may produce a very large amount of output.
+* Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background."""
+
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The bash command to run.",
+            },
+        },
+        "required": ["command"],
+    }
+
+    def __init__(
+        self,
+        swerex_wrapper: SWEReXWrapper,
+        session_id: str = "main",
+        workspace_root: Optional[Path] = None,
+        require_confirmation: bool = True,
+        timeout: int = 60,
+        additional_banned_command_strs: Optional[List[str]] = None,
+    ):
+        """Initialize the SWEReXBashTool.
+
+        Args:
+            swerex_wrapper: The SWE-ReX wrapper to use for command execution
+            session_id: Session ID to use for persistent shell
+            workspace_root: Root directory of the workspace
+            require_confirmation: Whether to require user confirmation before executing commands
+            timeout: Command execution timeout in seconds
+            additional_banned_command_strs: Additional command strings to ban
+        """
+        super().__init__()
+        self.swerex_wrapper = swerex_wrapper
+        self.session_id = session_id
+        self.workspace_root = workspace_root
+        self.require_confirmation = require_confirmation
+        self.timeout = timeout
+
+        self.banned_command_strs = [
+            "git init",
+            "git commit",
+            "git add",
+        ]
+        if additional_banned_command_strs is not None:
+            self.banned_command_strs.extend(additional_banned_command_strs)
+
+    def run_impl(
+        self,
+        tool_input: Dict[str, Any],
+        dialog_messages: Optional[DialogMessages] = None,
+    ) -> ToolImplOutput:
+        """Execute a bash command using SWE-ReX and return its output.
+
+        Args:
+            tool_input: Dictionary containing the command to execute
+            dialog_messages: Optional dialog messages for context
+
+        Returns:
+            ToolImplOutput containing the command output
+        """
+        command = tool_input["command"]
+        aux_data = {
+            "original_command": command,
+            "executed_command": command,
+        }
+
+        # Check for banned command strings
+        for banned_str in self.banned_command_strs:
+            if banned_str in command:
+                return ToolImplOutput(
+                    f"Command not executed due to banned string in command: {banned_str} found in {command}.",
+                    f"Command not executed due to banned string in command: {banned_str} found in {command}.",
+                    aux_data | {"success": False, "reason": "Banned command"},
+                )
+
+        # Ask for confirmation if required
+        if self.require_confirmation:
+            confirmation = input(
+                f"Do you want to execute the command: {command}? (y/n): "
+            )
+            if confirmation.lower() != "y":
+                return ToolImplOutput(
+                    "Command not executed due to lack of user confirmation.",
+                    "Command execution cancelled",
+                    aux_data | {"success": False, "reason": "User did not confirm"},
+                )
+
+        # Check session health by running a simple command
+        try:
+            health_check = self.swerex_wrapper.run_command("echo hello", self.session_id)
+            if health_check["exit_code"] != 0 or health_check["stdout"].strip() != "hello":
+                # Try to reset the session if it's not responding correctly
+                self.swerex_wrapper.reset_session(self.session_id)
+        except Exception:
+            # Try to reset the session if any error occurs
+            self.swerex_wrapper.reset_session(self.session_id)
+
+        # Execute the command
+        try:
+            result = self.swerex_wrapper.run_command(command, self.session_id, self.timeout)
+        except Exception as e:
+            return ToolImplOutput(
+                f"Error executing command: {str(e)}",
+                f"Failed to execute command '{command}'",
+                aux_data
+                | {
+                    "success": False,
+                    "error": str(e),
+                },
+            )
+
+        # Check for timeout
+        if result["exit_code"] == 124 and "Command timed out" in result["stderr"]:
+            return ToolImplOutput(
+                "Command timed out. Please try again.",
+                "Command timed out. Please try again.",
+                aux_data | {"success": False},
+            )
+
+        # Return the result
+        return ToolImplOutput(
+            result["stdout"],
+            f"Command '{command}' executed with exit code {result['exit_code']}.",
+            aux_data | {"success": result["exit_code"] == 0},
+        )
+
+    def get_tool_start_message(self, tool_input: Dict[str, Any]) -> str:
+        """Get a message to display when the tool starts.
+
+        Args:
+            tool_input: Dictionary containing the command to execute
+
+        Returns:
+            A message describing the command being executed
+        """
+        return f"Executing bash command via SWE-ReX: {tool_input['command']}"
+
+
 def create_bash_tool(
     ask_user_permission: bool = True,
     cwd: Optional[Path] = None,
@@ -356,6 +517,7 @@ def create_bash_tool(
         ask_user_permission: Whether to ask user permission for commands
         cwd: Default working directory for commands
         command_filters: Optional list of command filters to apply before execution
+        additional_banned_command_strs: Additional command strings to ban
 
     Returns:
         BashTool instance configured with the provided parameters
@@ -417,6 +579,7 @@ def create_docker_bash_tool(
         user: Username to run commands as in the container
         ask_user_permission: Whether to ask user permission for commands
         cwd: Default working directory for commands
+        additional_banned_command_strs: Additional command strings to ban
 
     Returns:
         BashTool instance configured with Docker command filter
@@ -430,5 +593,33 @@ def create_docker_bash_tool(
         ask_user_permission=ask_user_permission,
         cwd=cwd,
         command_filters=[docker_filter],
+        additional_banned_command_strs=additional_banned_command_strs,
+    )
+
+
+def create_swerex_bash_tool(
+    swerex_wrapper: SWEReXWrapper,
+    session_id: str = "main",
+    ask_user_permission: bool = True,
+    cwd: Optional[Path] = None,
+    additional_banned_command_strs: Optional[List[str]] = None,
+) -> SWEReXBashTool:
+    """Create a bash tool that executes commands using SWE-ReX.
+
+    Args:
+        swerex_wrapper: The SWE-ReX wrapper to use
+        session_id: Session ID to use for persistent shell
+        ask_user_permission: Whether to ask user permission for commands
+        cwd: Default working directory for commands
+        additional_banned_command_strs: Additional command strings to ban
+
+    Returns:
+        SWEReXBashTool instance configured with the provided parameters
+    """
+    return SWEReXBashTool(
+        swerex_wrapper=swerex_wrapper,
+        session_id=session_id,
+        workspace_root=cwd,
+        require_confirmation=ask_user_permission,
         additional_banned_command_strs=additional_banned_command_strs,
     )

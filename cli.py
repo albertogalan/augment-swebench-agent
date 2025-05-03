@@ -68,38 +68,70 @@ def main():
         action="store_true",
         default=False,
     )
-    parser.add_argument(
+
+    # Execution environment options
+    execution_group = parser.add_argument_group("Execution Environment")
+
+    # SWE-ReX options - avoid nesting argument groups
+    swerex_group = parser.add_argument_group("SWE-ReX options")
+    swerex_group.add_argument(
+        "--use-swerex",
+        action="store_true",
+        default=False,
+        help="Use SWE-ReX for command execution",
+    )
+    swerex_group.add_argument(
+        "--swerex-deployment",
+        type=str,
+        choices=["local", "docker", "fargate", "modal"],
+        default="local",
+        help="SWE-ReX deployment type",
+    )
+    swerex_group.add_argument(
+        "--swerex-docker-image",
+        type=str,
+        default="python:3.11",
+        help="Docker image to use with SWE-ReX Docker deployment",
+    )
+
+    # Legacy Docker options - avoid nesting argument groups
+    docker_group = parser.add_argument_group("Legacy Docker options (ignored if using SWE-ReX)")
+    docker_group.add_argument(
         "--use-container-workspace",
         type=str,
         default=None,
-        help="(Optional) Path to the container workspace to run commands in.",
+        help="Path to the container workspace to run commands in",
     )
-    parser.add_argument(
+    docker_group.add_argument(
         "--docker-container-id",
         type=str,
         default=None,
-        help="(Optional) Docker container ID to run commands in.",
+        help="Docker container ID to run commands in",
     )
+
     parser.add_argument(
         "--minimize-stdout-logs",
-        help="Minimize the amount of logs printed to stdout.",
+        help="Minimize the amount of logs printed to stdout",
         action="store_true",
         default=False,
     )
-    parser.add_argument(
+
+    # LLM options
+    llm_group = parser.add_argument_group("Language Model")
+    llm_group.add_argument(
         "--llm",
         type=str,
         default="anthropic",
         choices=["anthropic", "deepseek", "openai"],
         help="LLM provider to use (anthropic, deepseek, or openai)",
     )
-    parser.add_argument(
+    llm_group.add_argument(
         "--model",
         type=str,
         default=None,
         help="Specific model to use (overrides default for selected LLM provider)",
     )
-    parser.add_argument(
+    llm_group.add_argument(
         "--max-tokens",
         type=int,
         default=None,
@@ -108,6 +140,7 @@ def main():
 
     args = parser.parse_args()
 
+    # Set up logging
     if os.path.exists(args.logs_path):
         os.remove(args.logs_path)
     logger_for_agent_logs = logging.getLogger("agent_logs")
@@ -140,7 +173,7 @@ def main():
         if args.llm == "anthropic":
             model_name = "claude-3-7-sonnet-20250219"
         elif args.llm == "deepseek":
-            model_name = "deepseek-chat"
+            model_name = "deepseek-coder"
         elif args.llm == "openai":
             model_name = "gpt-4o-2024-05-13"
         else:
@@ -161,11 +194,21 @@ def main():
     else:
         max_tokens = args.max_tokens
 
-    # Print welcome message
+    # Print welcome message with execution environment information
+    env_info = f"LLM: {args.llm} (model: {model_name}, max tokens: {max_tokens})"
+    if args.use_swerex:
+        env_info += f"\nExecution: SWE-ReX ({args.swerex_deployment})"
+        if args.swerex_deployment == "docker":
+            env_info += f", image: {args.swerex_docker_image}"
+    elif args.docker_container_id:
+        env_info += f"\nExecution: Docker (container: {args.docker_container_id})"
+    else:
+        env_info += "\nExecution: Local"
+
     if not args.minimize_stdout_logs:
         console.print(
             Panel(
-                f"[bold]Agent CLI using {args.llm} LLM[/bold] (model: {model_name}, max tokens: {max_tokens})\n\n"
+                f"[bold]Agent CLI[/bold]\n\n{env_info}\n\n"
                 + "Type your instructions to the agent. Press Ctrl+C to exit.\n"
                 + "Type 'exit' or 'quit' to end the session.",
                 title="[bold blue]Agent CLI[/bold blue]",
@@ -175,7 +218,7 @@ def main():
         )
     else:
         logger_for_agent_logs.info(
-            f"Agent CLI started with {args.llm} LLM (model: {model_name}, max tokens: {max_tokens}). "
+            f"Agent CLI started. {env_info}. "
             "Waiting for user input. Press Ctrl+C to exit. Type 'exit' or 'quit' to end the session."
         )
 
@@ -237,11 +280,18 @@ def main():
 
     # Initialize workspace manager
     workspace_path = Path(args.workspace).resolve()
+
+    # Set container_workspace to /workspace for SWE-ReX Docker deployment
+    container_workspace = args.use_container_workspace
+    if args.use_swerex and args.swerex_deployment == "docker":
+        container_workspace = "/workspace"
+        logger_for_agent_logs.info("Using /workspace as container workspace for SWE-ReX Docker deployment")
+
     workspace_manager = WorkspaceManager(
-        root=workspace_path, container_workspace=args.use_container_workspace
+        root=workspace_path, container_workspace=container_workspace
     )
 
-    # Initialize agent
+    # Initialize agent with SWE-ReX if specified
     agent = Agent(
         client=client,
         workspace_manager=workspace_manager,
@@ -250,7 +300,12 @@ def main():
         max_output_tokens_per_turn=max_tokens,
         max_turns=MAX_TURNS,
         ask_user_permission=args.needs_permission,
-        docker_container_id=args.docker_container_id,
+        # If using SWE-ReX, pass those parameters
+        use_swerex=args.use_swerex,
+        swerex_deployment_type=args.swerex_deployment,
+        swerex_docker_image=args.swerex_docker_image,
+        # Only use docker_container_id if SWE-ReX is not used
+        docker_container_id=None if args.use_swerex else args.docker_container_id,
     )
 
     # Determine the problem statement

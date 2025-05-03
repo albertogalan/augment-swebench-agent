@@ -46,17 +46,44 @@ def main():
         action="store_true",
         default=False,
     )
-    parser.add_argument(
+    # Execution environment options
+    execution_group = parser.add_argument_group("Execution Environment")
+
+    # SWE-ReX options
+    swerex_group = parser.add_argument_group("SWE-ReX options")
+    swerex_group.add_argument(
+        "--use-swerex",
+        action="store_true",
+        default=False,
+        help="Use SWE-ReX for command execution",
+    )
+    swerex_group.add_argument(
+        "--swerex-deployment",
+        type=str,
+        choices=["local", "docker", "fargate", "modal"],
+        default="local",
+        help="SWE-ReX deployment type",
+    )
+    swerex_group.add_argument(
+        "--swerex-docker-image",
+        type=str,
+        default="python:3.11",
+        help="Docker image to use with SWE-ReX Docker deployment",
+    )
+
+    # Legacy Docker options
+    docker_group = parser.add_argument_group("Legacy Docker options (ignored if using SWE-ReX)")
+    docker_group.add_argument(
         "--use-container-workspace",
         type=str,
         default=None,
-        help="(Optional) Path to the container workspace to run commands in.",
+        help="Path to the container workspace to run commands in",
     )
-    parser.add_argument(
+    docker_group.add_argument(
         "--docker-container-id",
         type=str,
         default=None,
-        help="(Optional) Docker container ID to run commands in.",
+        help="Docker container ID to run commands in",
     )
     parser.add_argument(
         "--minimize-stdout-logs",

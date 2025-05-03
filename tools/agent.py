@@ -1,6 +1,16 @@
+"""
+Agent implementation with integrated file transfer capability for remote environments.
+
+This implementation extends the Agent class with file transfer capabilities
+using SWE-ReX for remote execution.
+"""
+
 from copy import deepcopy
-from typing import Any, Optional
-from tools.bash_tool import create_bash_tool, create_docker_bash_tool
+from typing import Any, Dict, Optional, List, Union
+from pathlib import Path
+import os
+
+from tools.bash_tool import create_bash_tool, create_docker_bash_tool, create_swerex_bash_tool
 from utils.common import (
     DialogMessages,
     LLMTool,
@@ -8,6 +18,8 @@ from utils.common import (
 )
 from utils.llm_client import LLMClient, TextResult
 from utils.workspace_manager import WorkspaceManager
+from utils.swerex_wrapper import SWEReXWrapper, DeploymentType
+from utils.file_transfer import FileTransfer
 from tools.complete_tool import CompleteTool
 from prompts.system_prompt import SYSTEM_PROMPT
 from tools.str_replace_tool import StrReplaceEditorTool
@@ -18,6 +30,8 @@ import logging
 
 
 class Agent(LLMTool):
+    """Agent with file transfer capability for remote environments."""
+
     name = "general_agent"
     description = """\
 A general agent that can accomplish tasks and answer questions.
@@ -58,14 +72,27 @@ try breaking down the task into smaller steps and call this tool multiple times.
         use_prompt_budgeting: bool = True,
         ask_user_permission: bool = False,
         docker_container_id: Optional[str] = None,
+        use_swerex: bool = False,
+        swerex_deployment_type: str = "local",
+        swerex_docker_image: str = "python:3.11",
+        auto_transfer_workspace: bool = True,
     ):
         """Initialize the agent.
 
         Args:
             client: The LLM client to use
+            workspace_manager: Workspace manager for taking snapshots
+            console: Console for output
+            logger_for_agent_logs: Logger for agent logs
             max_output_tokens_per_turn: Maximum tokens per turn
             max_turns: Maximum number of turns
-            workspace_manager: Optional workspace manager for taking snapshots
+            use_prompt_budgeting: Whether to use prompt budgeting
+            ask_user_permission: Whether to ask user permission before executing commands
+            docker_container_id: Docker container ID to use (legacy approach)
+            use_swerex: Whether to use SWE-ReX for command execution
+            swerex_deployment_type: SWE-ReX deployment type (local, docker, fargate, modal)
+            swerex_docker_image: Docker image to use (for SWE-ReX Docker deployment)
+            auto_transfer_workspace: Automatically transfer workspace to remote environment
         """
         super().__init__()
         self.client = client
@@ -79,11 +106,69 @@ try breaking down the task into smaller steps and call this tool multiple times.
             logger_for_agent_logs=logger_for_agent_logs,
             use_prompt_budgeting=use_prompt_budgeting,
         )
+        self.auto_transfer_workspace = auto_transfer_workspace
 
         # Create and store the complete tool
         self.complete_tool = CompleteTool()
 
-        if docker_container_id is not None:
+        # Initialize SWE-ReX if requested
+        self.use_swerex = use_swerex
+        self.swerex_wrapper = None
+        self.file_transfer = None
+
+        bash_tool = None
+        if use_swerex:
+            # Convert string deployment type to enum
+            try:
+                deployment_type = DeploymentType(swerex_deployment_type)
+            except ValueError:
+                deployment_type = DeploymentType.LOCAL
+                logger_for_agent_logs.warning(
+                    f"Invalid SWE-ReX deployment type: {swerex_deployment_type}. Using LOCAL instead."
+                )
+
+            # Initialize SWE-ReX wrapper
+            self.swerex_wrapper = SWEReXWrapper(
+                deployment_type=deployment_type,
+                logger=logger_for_agent_logs,
+                docker_image=swerex_docker_image,
+                docker_container_id=docker_container_id,
+                workspace_path=workspace_manager.root,
+            )
+
+            # Initialize SWE-ReX deployment
+            self.swerex_wrapper.initialize()
+
+            # Set up file transfer utility
+            self.file_transfer = FileTransfer(
+                swerex_wrapper=self.swerex_wrapper,
+                logger=logger_for_agent_logs,
+            )
+
+            # Automatically transfer workspace if requested
+            if auto_transfer_workspace and workspace_manager.root:
+                self._transfer_workspace()
+
+            # Use SWE-ReX bash tool
+            bash_tool = create_swerex_bash_tool(
+                self.swerex_wrapper,
+                ask_user_permission=ask_user_permission,
+                cwd=workspace_manager.root,
+            )
+            logger_for_agent_logs.info(
+                f"Initialized SWE-ReX with deployment type: {deployment_type.value}"
+            )
+
+            # If using Docker deployment, get the container ID for compatibility
+            if deployment_type == DeploymentType.DOCKER:
+                self.docker_container_id = self.swerex_wrapper.get_container_id()
+                logger_for_agent_logs.info(
+                    f"SWE-ReX Docker container ID: {self.docker_container_id}"
+                )
+            else:
+                self.docker_container_id = None
+        elif docker_container_id is not None:
+            # Legacy Docker approach (using command filter)
             print(
                 colored(
                     f"Enabling docker bash tool with container {docker_container_id}",
@@ -96,12 +181,18 @@ try breaking down the task into smaller steps and call this tool multiple times.
             bash_tool = create_docker_bash_tool(
                 container=docker_container_id,
                 ask_user_permission=ask_user_permission,
+                cwd=workspace_manager.root,
             )
+            self.docker_container_id = docker_container_id
         else:
+            # Local bash tool (default)
             bash_tool = create_bash_tool(
                 ask_user_permission=ask_user_permission,
+                cwd=workspace_manager.root,
             )
+            self.docker_container_id = None
 
+        # Initialize tools
         self.tools = [
             bash_tool,
             StrReplaceEditorTool(workspace_manager=workspace_manager),
@@ -109,9 +200,87 @@ try breaking down the task into smaller steps and call this tool multiple times.
             self.complete_tool,
         ]
 
+    def _transfer_workspace(self) -> None:
+        """
+        Transfer the workspace to the remote environment.
+        """
+        if not self.file_transfer or not self.workspace_manager.root:
+            return
+
+        try:
+            self.logger_for_agent_logs.info(
+                f"Transferring workspace {self.workspace_manager.root} to remote environment..."
+            )
+
+            # Create a remote directory for the workspace
+            remote_workspace_name = os.path.basename(self.workspace_manager.root)
+            if not remote_workspace_name or remote_workspace_name == ".":
+                remote_workspace_name = "workspace"
+
+            # Determine the remote workspace path based on deployment type
+            if self.swerex_wrapper and self.swerex_wrapper.deployment_type == DeploymentType.DOCKER:
+                # For Docker, use /workspace
+                remote_workspace_path = "/workspace"
+                remote_subdir = None  # No subdirectory needed
+                self.logger_for_agent_logs.info(
+                    f"Using Docker deployment with workspace at {remote_workspace_path}"
+                )
+            else:
+                # For other deployments, use ~/workspace/remote_workspace_name
+                remote_workspace_path = os.path.join("~/workspace", remote_workspace_name)
+                remote_subdir = remote_workspace_name
+
+            # Transfer the directory
+            files_transferred = self.file_transfer.transfer_directory(
+                self.workspace_manager.root,
+                remote_subdir=remote_subdir
+            )
+
+            self.logger_for_agent_logs.info(
+                f"Workspace transfer complete. {files_transferred} files transferred."
+            )
+
+            # Update the path in the SWE-ReX bash sessions to point to the transferred workspace
+            if self.swerex_wrapper:
+                self.swerex_wrapper.run_command(f"cd {remote_workspace_path}")
+                self.logger_for_agent_logs.info(
+                    f"Changed remote working directory to {remote_workspace_path}"
+                )
+
+        except Exception as e:
+            self.logger_for_agent_logs.error(f"Failed to transfer workspace: {e}")
+
+    def transfer_files(self, local_paths: List[Union[str, Path]], remote_dir: Optional[str] = None) -> int:
+        """
+        Transfer files to the remote environment.
+
+        Args:
+            local_paths: List of local files or directories to transfer
+            remote_dir: Optional remote directory to transfer to
+
+        Returns:
+            Number of files transferred
+        """
+        if not self.file_transfer:
+            raise RuntimeError("File transfer is not available. Agent must be initialized with use_swerex=True.")
+
+        total_files = 0
+        for path in local_paths:
+            path_obj = Path(path)
+            if path_obj.is_dir():
+                files = self.file_transfer.transfer_directory(path, remote_dir)
+                total_files += files
+            elif path_obj.is_file():
+                remote_path = os.path.join(remote_dir or "~/workspace", path_obj.name) if remote_dir else path_obj.name
+                success = self.file_transfer.transfer_file(path, remote_path)
+                if success:
+                    total_files += 1
+
+        return total_files
+
     def run_impl(
         self,
-        tool_input: dict[str, Any],
+        tool_input: Dict[str, Any],
         dialog_messages: Optional[DialogMessages] = None,
     ) -> ToolImplOutput:
         instruction = tool_input["instruction"]
@@ -255,14 +424,14 @@ try breaking down the task into smaller steps and call this tool multiple times.
             tool_output=agent_answer, tool_result_message=agent_answer
         )
 
-    def get_tool_start_message(self, tool_input: dict[str, Any]) -> str:
+    def get_tool_start_message(self, tool_input: Dict[str, Any]) -> str:
         return f"Agent started with instruction: {tool_input['instruction']}"
 
     def run_agent(
         self,
         instruction: str,
         resume: bool = False,
-        orientation_instruction: str | None = None,
+        orientation_instruction: Optional[str] = None,
     ) -> str:
         """Start a new agent run.
 
@@ -270,6 +439,7 @@ try breaking down the task into smaller steps and call this tool multiple times.
             instruction: The instruction to the agent.
             resume: Whether to resume the agent from the previous state,
                 continuing the dialog.
+            orientation_instruction: Optional orientation instruction.
 
         Returns:
             A tuple of (result, message).
@@ -291,3 +461,12 @@ try breaking down the task into smaller steps and call this tool multiple times.
     def clear(self):
         self.dialog.clear()
         self.interrupted = False
+
+    def __del__(self):
+        """Cleanup SWE-ReX resources when the agent is destroyed."""
+        if hasattr(self, 'swerex_wrapper') and self.swerex_wrapper is not None:
+            try:
+                self.swerex_wrapper.shutdown()
+            except Exception as e:
+                if hasattr(self, 'logger_for_agent_logs'):
+                    self.logger_for_agent_logs.warning(f"Error shutting down SWE-ReX: {e}")

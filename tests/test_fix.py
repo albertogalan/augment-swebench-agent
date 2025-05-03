@@ -1,30 +1,48 @@
 #!/usr/bin/env python3
 """
-Script to test the fix for DeepSeek LLM integration in cli.py.
+Script to test the fix for the Docker workspace issue.
 """
 
 import os
-import subprocess
 import sys
+from pathlib import Path
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Import the fixed modules
+from utils.swerex_wrapper import SWEReXWrapper, DeploymentType
+from utils.file_transfer import FileTransfer
+
+def test_file_transfer_init():
+    """Test that FileTransfer initializes correctly with DeploymentType."""
+    try:
+        # Create a mock SWEReXWrapper
+        wrapper = SWEReXWrapper(deployment_type=DeploymentType.DOCKER)
+        
+        # Initialize FileTransfer with the wrapper
+        file_transfer = FileTransfer(swerex_wrapper=wrapper, logger=logger)
+        
+        logger.info("FileTransfer initialized successfully with DeploymentType")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing FileTransfer: {e}")
+        return False
 
 def main():
-    """Test the fix for DeepSeek LLM integration."""
-    # Set a dummy API key for testing and enable debug mode
-    os.environ["DEEPSEEK_API_KEY"] = "test_key"
-    os.environ["DEEPSEEK_DEBUG"] = "1"
+    """Run the tests."""
+    logger.info("Testing the fix for the Docker workspace issue")
     
-    # Run the CLI with DeepSeek LLM
-    cmd = ["python", "cli.py", "--llm", "deepseek", "--problem-statement", "Write a simple Python function to calculate the factorial of a number"]
+    # Test FileTransfer initialization
+    if test_file_transfer_init():
+        logger.info("✅ FileTransfer initialization test passed")
+    else:
+        logger.error("❌ FileTransfer initialization test failed")
+        return 1
     
-    print(f"Running command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    print("\nSTDOUT:")
-    print(result.stdout)
-    
-    print("\nSTDERR:")
-    print(result.stderr)
-    
+    logger.info("All tests passed!")
     return 0
 
 if __name__ == "__main__":
