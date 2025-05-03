@@ -22,11 +22,11 @@ from utils.workspace_manager import WorkspaceManager
 from utils.llm_client import get_client
 from prompts.instruction import INSTRUCTION_PROMPT
 
-# Default token limits for different LLM providers
-ANTHROPIC_MAX_TOKENS = 32768
-DEEPSEEK_MAX_TOKENS = 8192
-OPENAI_MAX_TOKENS = 4096
-MAX_TURNS = 50
+# Import DeepSeek client implementation
+from deepseek_client import get_deepseek_client
+
+MAX_OUTPUT_TOKENS_PER_TURN = 32768
+MAX_TURNS = 200
 
 
 def main():
@@ -99,12 +99,6 @@ def main():
         default=None,
         help="Specific model to use (overrides default for selected LLM provider)",
     )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=None,
-        help="Maximum number of tokens for model output (provider-specific default if not specified)",
-    )
 
     args = parser.parse_args()
 
@@ -135,6 +129,23 @@ def main():
     # Initialize console
     console = Console()
 
+    # Print welcome message
+    if not args.minimize_stdout_logs:
+        console.print(
+            Panel(
+                f"[bold]Agent CLI using {args.llm} LLM[/bold]\n\n"
+                + "Type your instructions to the agent. Press Ctrl+C to exit.\n"
+                + "Type 'exit' or 'quit' to end the session.",
+                title="[bold blue]Agent CLI[/bold blue]",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+    else:
+        logger_for_agent_logs.info(
+            f"Agent CLI started with {args.llm} LLM. Waiting for user input. Press Ctrl+C to exit. Type 'exit' or 'quit' to end the session."
+        )
+
     # Set default model based on provider
     if args.model is None:
         if args.llm == "anthropic":
@@ -148,39 +159,7 @@ def main():
     else:
         model_name = args.model
 
-    # Set max tokens based on provider if not specified
-    if args.max_tokens is None:
-        if args.llm == "anthropic":
-            max_tokens = ANTHROPIC_MAX_TOKENS
-        elif args.llm == "deepseek":
-            max_tokens = DEEPSEEK_MAX_TOKENS
-        elif args.llm == "openai":
-            max_tokens = OPENAI_MAX_TOKENS
-        else:
-            max_tokens = ANTHROPIC_MAX_TOKENS  # Default fallback
-    else:
-        max_tokens = args.max_tokens
-
-    # Print welcome message
-    if not args.minimize_stdout_logs:
-        console.print(
-            Panel(
-                f"[bold]Agent CLI using {args.llm} LLM[/bold] (model: {model_name}, max tokens: {max_tokens})\n\n"
-                + "Type your instructions to the agent. Press Ctrl+C to exit.\n"
-                + "Type 'exit' or 'quit' to end the session.",
-                title="[bold blue]Agent CLI[/bold blue]",
-                border_style="blue",
-                padding=(1, 2),
-            )
-        )
-    else:
-        logger_for_agent_logs.info(
-            f"Agent CLI started with {args.llm} LLM (model: {model_name}, max tokens: {max_tokens}). "
-            "Waiting for user input. Press Ctrl+C to exit. Type 'exit' or 'quit' to end the session."
-        )
-
     # Initialize LLM client based on provider choice
-    client = None
     if args.llm == "anthropic":
         client = get_client(
             "anthropic-direct",
@@ -189,35 +168,26 @@ def main():
         )
     elif args.llm == "deepseek":
         try:
-            # Try to import from the module if installed
-            sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+            # First try to import from the utils package if it has been installed there
+            from utils.llm_client import get_deepseek_client
+            client = get_deepseek_client(model_name=model_name)
+        except ImportError:
+            # Fall back to the local import
             try:
-                from deepseek_client import get_deepseek_client
                 client = get_deepseek_client(model_name=model_name)
-                logger_for_agent_logs.info(f"Using DeepSeek model: {model_name}")
-            except ImportError:
-                # Fall back to local import
-                import importlib.util
-                spec = importlib.util.spec_from_file_location("deepseek_client", "deepseek_client.py")
-                if spec is None or spec.loader is None:
-                    raise ImportError("Could not find deepseek_client.py")
-                deepseek_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(deepseek_module)
-                client = deepseek_module.get_deepseek_client(model_name=model_name)
-                logger_for_agent_logs.info(f"Using DeepSeek model from local file: {model_name}")
-        except Exception as e:
-            logger_for_agent_logs.error(f"DeepSeek API error: {str(e)}")
-            console.print(f"[bold red]DeepSeek API error: {str(e)}[/bold red]")
-            console.print("[yellow]Using mock response for testing[/yellow]")
+            except Exception as e:
+                logger_for_agent_logs.error(f"DeepSeek API error: {str(e)}")
+                console.print(f"[bold red]DeepSeek API error: {str(e)}[/bold red]")
+                console.print("[yellow]Using mock response for testing[/yellow]")
 
-            # Create a simple mock client for testing
-            from utils.llm_client import LLMClient, TextResult
+                # Create a simple mock client for testing
+                from utils.llm_client import LLMClient, TextResult
 
-            class MockClient(LLMClient):
-                def generate(self, messages, max_tokens, system_prompt=None, temperature=0.0, tools=[], tool_choice=None, thinking_tokens=None):
-                    return [TextResult(text="This is a mock response for testing.")], {"tokens": 0}
+                class MockClient(LLMClient):
+                    def generate(self, messages, max_tokens, system_prompt=None, temperature=0.0, tools=[], tool_choice=None, thinking_tokens=None):
+                        return [TextResult(text="This is a mock response for testing.")], {"tokens": 0}
 
-            client = MockClient()
+                client = MockClient()
     elif args.llm == "openai":
         client = get_client(
             "openai-direct",
@@ -231,10 +201,6 @@ def main():
             use_caching=True,
         )
 
-    if client is None:
-        console.print(f"[bold red]Failed to initialize LLM client for {args.llm}[/bold red]")
-        sys.exit(1)
-
     # Initialize workspace manager
     workspace_path = Path(args.workspace).resolve()
     workspace_manager = WorkspaceManager(
@@ -247,7 +213,7 @@ def main():
         workspace_manager=workspace_manager,
         console=console,
         logger_for_agent_logs=logger_for_agent_logs,
-        max_output_tokens_per_turn=max_tokens,
+        max_output_tokens_per_turn=MAX_OUTPUT_TOKENS_PER_TURN,
         max_turns=MAX_TURNS,
         ask_user_permission=args.needs_permission,
         docker_container_id=args.docker_container_id,
@@ -308,9 +274,8 @@ def main():
                 result = agent.run_agent(user_input, resume=True)
                 logger_for_agent_logs.info(f"Agent: {result}")
             except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                logger_for_agent_logs.error(error_msg)
-                console.print(f"[bold red]{error_msg}[/bold red]")
+                logger_for_agent_logs.info(f"Error: {str(e)}")
+                console.print(f"[bold red]Error: {str(e)}[/bold red]")
 
             logger_for_agent_logs.info("\n" + "-" * 40 + "\n")
 
