@@ -36,12 +36,22 @@ def main():
         default=".",
         help="Path to the workspace",
     )
-    parser.add_argument(
+
+    # Problem statement group (mutually exclusive)
+    problem_group = parser.add_mutually_exclusive_group()
+    problem_group.add_argument(
         "--problem-statement",
         type=str,
         default=None,
         help="Problem statement to pass to the agent. Makes the agent non-interactive.",
     )
+    problem_group.add_argument(
+        "--problem-file",
+        type=str,
+        default=None,
+        help="Path to a file containing the problem statement. Makes the agent non-interactive.",
+    )
+
     parser.add_argument(
         "--logs-path",
         type=str,
@@ -137,14 +147,31 @@ def main():
         docker_container_id=args.docker_container_id,
     )
 
+    # Determine the problem statement
+    problem_statement = None
     if args.problem_statement is not None:
+        problem_statement = args.problem_statement
+    elif args.problem_file is not None:
+        try:
+            problem_file_path = Path(args.problem_file)
+            if not problem_file_path.exists():
+                console.print(f"[bold red]Error: Problem file not found: {args.problem_file}[/bold red]")
+                sys.exit(1)
+            problem_statement = problem_file_path.read_text()
+            console.print(f"[green]Successfully loaded problem statement from {args.problem_file}[/green]")
+        except Exception as e:
+            console.print(f"[bold red]Error reading problem file: {str(e)}[/bold red]")
+            sys.exit(1)
+
+    # Format the instruction if we have a problem statement
+    if problem_statement is not None:
         instruction = INSTRUCTION_PROMPT.format(
             location=(
                 workspace_path
                 if args.use_container_workspace is None
                 else args.use_container_workspace
             ),
-            pr_description=args.problem_statement,
+            pr_description=problem_statement,
         )
     else:
         instruction = None

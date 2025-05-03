@@ -37,6 +37,7 @@ def run_eval_on_single_problem(problem_id: str, workspace_path: Path, console: C
     }
 
     try:
+        time.sleep(5)
         run_evaluation(
             predictions_file=workspace_path / "predictions.json",
             dataset=get_dataset_name(

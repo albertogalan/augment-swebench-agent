@@ -165,6 +165,73 @@ def recursively_remove_invoke_tag(obj):
     return result_obj
 
 
+class DeepSeekDirectClient(LLMClient):
+    """Use DeepSeek models via API."""
+
+    def __init__(
+        self,
+        model_name="deepseek-coder-v2",  # Update with appropriate DeepSeek model name
+        max_retries=2,
+        thinking_tokens=None,
+        use_caching=True,
+    ):
+        """Initialize the DeepSeek client."""
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        # You'll need to import and initialize the DeepSeek client here
+        # This will depend on DeepSeek's Python SDK
+        self.client = None  # Replace with DeepSeek client initialization
+        self.model_name = model_name
+        self.max_retries = max_retries
+        self.use_caching = use_caching
+
+    def generate(
+        self,
+        messages: LLMMessages,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        tools: list[ToolParam] = [],
+        tool_choice: dict[str, str] | None = None,
+        thinking_tokens: int | None = None,
+    ) -> Tuple[list[AssistantContentBlock], dict[str, Any]]:
+        """Generate responses using DeepSeek model.
+
+        This implementation will depend on DeepSeek's API structure.
+        You'll need to:
+        1. Convert DialogMessages format to DeepSeek's expected format
+        2. Make API calls with retry logic
+        3. Convert DeepSeek responses back to the expected format
+        """
+        # Convert messages to DeepSeek format
+        deepseek_messages = []
+        # Implement conversion logic here...
+
+        # Make API call with retries
+        response = None
+        for retry in range(self.max_retries):
+            try:
+                # Implement DeepSeek API call
+                # response = self.client.chat.completions.create(...)
+                break
+            except Exception as e:
+                if retry == self.max_retries - 1:
+                    print(f"Failed DeepSeek request after {retry + 1} retries")
+                    raise e
+                else:
+                    print(f"Retrying LLM request: {retry + 1}/{self.max_retries}")
+                    time.sleep(5 * random.uniform(0.8, 1.2))
+
+        # Convert response back to expected format
+        augment_messages = []
+        # Implement conversion logic here...
+
+        message_metadata = {
+            "raw_response": response,
+            # Add other relevant metadata from DeepSeek response
+        }
+
+        return augment_messages, message_metadata
+
 class AnthropicDirectClient(LLMClient):
     """Use Anthropic models via first party API."""
 
@@ -347,7 +414,7 @@ class AnthropicDirectClient(LLMClient):
                 else:
                     print(f"Retrying LLM request: {retry + 1}/{self.max_retries}")
                     # Sleep 4-6 seconds with jitter to avoid thundering herd.
-                    time.sleep(5 * random.uniform(0.8, 1.2))
+                    time.sleep(10 * random.uniform(0.8, 1.2))
 
         # Convert messages back to Augment format
         augment_messages = []
@@ -593,12 +660,19 @@ class OpenAIDirectClient(LLMClient):
 
         return augment_messages, message_metadata
 
-
 def get_client(client_name: str, **kwargs) -> LLMClient:
     """Get a client for a given client name."""
     if client_name == "anthropic-direct":
         return AnthropicDirectClient(**kwargs)
     elif client_name == "openai-direct":
-        return OpenAIDirectClient(**kwargs)
+        # Filter out thinking_tokens if it's passed
+        kwargs_copy = kwargs.copy()
+        kwargs_copy.pop("thinking_tokens", None)
+        return OpenAIDirectClient(**kwargs_copy)
+    elif client_name == "deepseek-direct":
+        # Filter out thinking_tokens if it's passed
+        kwargs_copy = kwargs.copy()
+        kwargs_copy.pop("thinking_tokens", None)
+        return DeepSeekDirectClient(**kwargs_copy)
     else:
         raise ValueError(f"Unknown client name: {client_name}")
