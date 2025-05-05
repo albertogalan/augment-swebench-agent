@@ -11,6 +11,7 @@ import argparse
 from pathlib import Path
 import sys
 import logging
+import toml
 
 from rich.console import Console
 from rich.panel import Panel
@@ -29,8 +30,19 @@ OPENAI_MAX_TOKENS = 4096
 MAX_TURNS = 50
 
 
+def load_config():
+    """Load configuration from config.toml if it exists."""
+    config_path = Path("config.toml")
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            return toml.load(f)
+    return {}
+
 def main():
     """Main entry point for the CLI."""
+    # Load configuration from config.toml
+    config = load_config()
+    
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="CLI for interacting with the Agent")
     parser.add_argument(
@@ -69,46 +81,6 @@ def main():
         default=False,
     )
 
-    # Execution environment options
-    execution_group = parser.add_argument_group("Execution Environment")
-
-    # SWE-ReX options - avoid nesting argument groups
-    swerex_group = parser.add_argument_group("SWE-ReX options")
-    swerex_group.add_argument(
-        "--use-swerex",
-        action="store_true",
-        default=False,
-        help="Use SWE-ReX for command execution",
-    )
-    swerex_group.add_argument(
-        "--swerex-deployment",
-        type=str,
-        choices=["local", "docker", "fargate", "modal"],
-        default="local",
-        help="SWE-ReX deployment type",
-    )
-    swerex_group.add_argument(
-        "--swerex-docker-image",
-        type=str,
-        default="python:3.11",
-        help="Docker image to use with SWE-ReX Docker deployment",
-    )
-
-    # Legacy Docker options - avoid nesting argument groups
-    docker_group = parser.add_argument_group("Legacy Docker options (ignored if using SWE-ReX)")
-    docker_group.add_argument(
-        "--use-container-workspace",
-        type=str,
-        default=None,
-        help="Path to the container workspace to run commands in",
-    )
-    docker_group.add_argument(
-        "--docker-container-id",
-        type=str,
-        default=None,
-        help="Docker container ID to run commands in",
-    )
-
     parser.add_argument(
         "--minimize-stdout-logs",
         help="Minimize the amount of logs printed to stdout",
@@ -116,29 +88,35 @@ def main():
         default=False,
     )
 
-    # LLM options
-    llm_group = parser.add_argument_group("Language Model")
-    llm_group.add_argument(
-        "--llm",
-        type=str,
-        default="anthropic",
-        choices=["anthropic", "deepseek", "openai"],
-        help="LLM provider to use (anthropic, deepseek, or openai)",
-    )
-    llm_group.add_argument(
-        "--model",
+    parser.add_argument(
+        "--docker-container-id",
         type=str,
         default=None,
-        help="Specific model to use (overrides default for selected LLM provider)",
+        help="ID of the Docker container to use for execution",
     )
-    llm_group.add_argument(
-        "--max-tokens",
-        type=int,
+
+    parser.add_argument(
+        "--use-container-workspace",
+        type=str,
         default=None,
-        help="Maximum number of tokens for model output (provider-specific default if not specified)",
+        help="Path to use as the container workspace (default: None)",
     )
 
     args = parser.parse_args()
+    
+    # Merge config with command-line arguments
+    llm_config = config.get("llm", {})
+    swerex_config = config.get("swerex", {})
+    
+    # Set LLM-related defaults from config
+    args.llm = llm_config.get("provider", "anthropic")
+    args.model = llm_config.get("model", None)
+    args.max_tokens = llm_config.get("max_tokens", None)
+    
+    # Set SWE-ReX-related defaults from config
+    args.use_swerex = swerex_config.get("use_swerex", False)
+    args.swerex_deployment = swerex_config.get("deployment", "local")
+    args.swerex_docker_image = swerex_config.get("docker_image", "python:3.11")
 
     # Set up logging
     if os.path.exists(args.logs_path):
@@ -194,13 +172,16 @@ def main():
     else:
         max_tokens = args.max_tokens
 
+    # Debug print to check args
+    print(f"DEBUG: args.docker_container_id = {getattr(args, 'docker_container_id', None)}")
+
     # Print welcome message with execution environment information
     env_info = f"LLM: {args.llm} (model: {model_name}, max tokens: {max_tokens})"
     if args.use_swerex:
         env_info += f"\nExecution: SWE-ReX ({args.swerex_deployment})"
         if args.swerex_deployment == "docker":
             env_info += f", image: {args.swerex_docker_image}"
-    elif args.docker_container_id:
+    elif getattr(args, 'docker_container_id', None):
         env_info += f"\nExecution: Docker (container: {args.docker_container_id})"
     else:
         env_info += "\nExecution: Local"

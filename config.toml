@@ -1,0 +1,9 @@
+[llm]
+provider = "deepseek"  # Options: anthropic, deepseek, openai
+model = "deepseek-coder"
+max_tokens = 8192
+
+[swerex]
+use_swerex = false
+deployment = "docker"
+docker_image = "python:3.11"

@@ -9,3 +9,4 @@ prompt-toolkit>=3.0.50
 pytest==7.4.3
 rich>=13.9.4
 termcolor>=2.5.0
+swe-rex=1.2.1
