@@ -7,3 +7,7 @@ max_tokens = 8192
 use_swerex = false
 deployment = "docker"
 docker_image = "python:3.11"
+
+[interactive]
+# Interactive environment commands
+commands = { ipython = "ipython", python = "python", gdb = "gdb", mysql = "mysql -u root", psql = "psql -U postgres", node = "node", mongo = "mongosh", vim = "vim", redis = "redis-cli", sqlite = "sqlite3", r = "R", julia = "julia", docker = "docker exec -it", htop = "htop", ftp = "ftp" }

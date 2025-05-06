@@ -3,13 +3,15 @@ SWE-ReX integration wrapper for persistent shell environments.
 
 This module provides integration with SWE-ReX to offer a unified approach to
 executing commands in different environments (local, Docker, AWS Fargate, Modal).
+It also supports running interactive environments like ipython, gdb, mysql client, etc.
 """
 
 import asyncio
 import logging
+import toml
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union, Tuple
+from typing import Optional, Dict, Any, List, Union, Tuple, Set
 
 
 # SWE-ReX imports
@@ -43,6 +45,7 @@ class SWEReXWrapper:
         docker_container_id: Optional[str] = None,
         workspace_path: Optional[Path] = None,
         timeout: int = 60,
+        config_path: str = "config.toml",
     ):
         """
         Initialize the SWE-ReX wrapper.
@@ -54,6 +57,7 @@ class SWEReXWrapper:
             docker_container_id: Existing Docker container ID to use (for Docker deployment)
             workspace_path: Path to the workspace (for mounting volumes)
             timeout: Command execution timeout in seconds
+            config_path: Path to the configuration file (default: config.toml)
         """
         self.deployment_type = deployment_type
         self.logger = logger or logging.getLogger(__name__)
@@ -61,15 +65,45 @@ class SWEReXWrapper:
         self.docker_container_id = docker_container_id
         self.workspace_path = workspace_path
         self.timeout = timeout
+        self.config_path = config_path
 
         self.deployment = None
         self.runtime = None
         self.default_session_id = "main"
         self.sessions = {}
+        
+        # Track interactive environments
+        self.interactive_environments = {}  # session_id -> environment_type
+        self.interactive_commands = self._load_interactive_commands()
 
         # For awaiting async operations in sync context
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
+        
+    def _load_interactive_commands(self) -> Dict[str, str]:
+        """
+        Load interactive commands from config.toml.
+        
+        Returns:
+            Dictionary mapping environment types to commands
+        """
+        try:
+            with open(self.config_path, "r") as f:
+                config = toml.load(f)
+            
+            # Get interactive commands from config
+            interactive_config = config.get("interactive", {})
+            commands = interactive_config.get("commands", {})
+            
+            if not commands and "command" in interactive_config:
+                # Support for single command in config
+                commands = {"default": interactive_config["command"]}
+                
+            self.logger.info(f"Loaded interactive commands: {commands}")
+            return commands
+        except Exception as e:
+            self.logger.warning(f"Failed to load interactive commands from config: {e}")
+            return {}
 
     def _run_async(self, coro):
         """Run an async function in the event loop."""
@@ -340,6 +374,231 @@ class SWEReXWrapper:
             if hasattr(self.deployment, 'container_id'):
                 return self.deployment.container_id
         return None
+        
+    def start_interactive_environment(
+        self,
+        environment_type: str = "default",
+        session_id: str = "main",
+        timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Start an interactive environment in a session.
+        
+        Args:
+            environment_type: Type of interactive environment to start (must be defined in config.toml)
+            session_id: The session ID to run the interactive environment in
+            timeout: Optional timeout override
+            
+        Returns:
+            Dictionary with stdout, stderr, and exit_code
+        """
+        if not self.runtime:
+            raise RuntimeError("SWE-ReX runtime not initialized. Call initialize() first.")
+            
+        # Ensure the session exists
+        if session_id not in self.sessions:
+            self.initialize_session(session_id)
+            
+        # Check if an interactive environment is already running in this session
+        if session_id in self.interactive_environments:
+            env_type = self.interactive_environments[session_id]
+            self.logger.warning(f"Interactive environment '{env_type}' is already running in session '{session_id}'")
+            return {
+                "stdout": f"Interactive environment '{env_type}' is already running",
+                "stderr": "",
+                "exit_code": 0,
+            }
+            
+        # Get the command for the specified environment type
+        if environment_type not in self.interactive_commands:
+            available_envs = ", ".join(self.interactive_commands.keys())
+            error_msg = f"Unknown interactive environment type: {environment_type}. Available types: {available_envs}"
+            self.logger.error(error_msg)
+            return {
+                "stdout": "",
+                "stderr": error_msg,
+                "exit_code": 1,
+            }
+            
+        command = self.interactive_commands[environment_type]
+        self.logger.info(f"Starting interactive environment '{environment_type}' with command: {command}")
+        
+        # Set timeout for the operation
+        actual_timeout = timeout or self.timeout
+        
+        try:
+            # Run the command in the session with interactive flag
+            result = self._run_async(self.runtime.run_in_session(
+                BashAction(
+                    command=command,
+                    session_id=session_id,
+                    timeout=actual_timeout,
+                    is_interactive_command=True
+                )
+            ))
+            
+            # Record that this session has an interactive environment running
+            self.interactive_environments[session_id] = environment_type
+            
+            return {
+                "stdout": result.output,
+                "stderr": "",  # SWE-ReX combines stdout and stderr
+                "exit_code": result.exit_code,
+            }
+        except asyncio.TimeoutError:
+            return {
+                "stdout": "",
+                "stderr": "Command timed out",
+                "exit_code": 124,  # Standard timeout exit code
+            }
+        except Exception as e:
+            return {
+                "stdout": "",
+                "stderr": f"Error starting interactive environment: {str(e)}",
+                "exit_code": 1,
+            }
+            
+    def send_to_interactive_environment(
+        self,
+        command: str,
+        session_id: str = "main",
+        timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Send a command to an interactive environment.
+        
+        Args:
+            command: The command to send to the interactive environment
+            session_id: The session ID where the interactive environment is running
+            timeout: Optional timeout override
+            
+        Returns:
+            Dictionary with stdout, stderr, and exit_code
+        """
+        if not self.runtime:
+            raise RuntimeError("SWE-ReX runtime not initialized. Call initialize() first.")
+            
+        # Check if an interactive environment is running in this session
+        if session_id not in self.interactive_environments:
+            error_msg = f"No interactive environment running in session '{session_id}'"
+            self.logger.error(error_msg)
+            return {
+                "stdout": "",
+                "stderr": error_msg,
+                "exit_code": 1,
+            }
+            
+        # Set timeout for the operation
+        actual_timeout = timeout or self.timeout
+        
+        try:
+            # Send the command to the interactive environment
+            result = self._run_async(self.runtime.run_in_session(
+                BashAction(
+                    command=command,
+                    session_id=session_id,
+                    timeout=actual_timeout,
+                    is_interactive_command=True
+                )
+            ))
+            
+            return {
+                "stdout": result.output,
+                "stderr": "",  # SWE-ReX combines stdout and stderr
+                "exit_code": result.exit_code,
+            }
+        except asyncio.TimeoutError:
+            return {
+                "stdout": "",
+                "stderr": "Command timed out",
+                "exit_code": 124,  # Standard timeout exit code
+            }
+        except Exception as e:
+            return {
+                "stdout": "",
+                "stderr": f"Error sending command to interactive environment: {str(e)}",
+                "exit_code": 1,
+            }
+            
+    def quit_interactive_environment(
+        self,
+        session_id: str = "main",
+        timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Quit an interactive environment.
+        
+        Args:
+            session_id: The session ID where the interactive environment is running
+            timeout: Optional timeout override
+            
+        Returns:
+            Dictionary with stdout, stderr, and exit_code
+        """
+        if not self.runtime:
+            raise RuntimeError("SWE-ReX runtime not initialized. Call initialize() first.")
+            
+        # Check if an interactive environment is running in this session
+        if session_id not in self.interactive_environments:
+            error_msg = f"No interactive environment running in session '{session_id}'"
+            self.logger.error(error_msg)
+            return {
+                "stdout": "",
+                "stderr": error_msg,
+                "exit_code": 1,
+            }
+            
+        # Get the environment type
+        environment_type = self.interactive_environments[session_id]
+        
+        # Set timeout for the operation
+        actual_timeout = timeout or self.timeout
+        
+        try:
+            # Send the quit command to the interactive environment
+            # This varies by environment type, but we'll use a generic approach
+            quit_command = "exit"
+            if environment_type == "gdb":
+                quit_command = "quit"
+            elif environment_type == "mysql":
+                quit_command = "exit"
+            elif environment_type == "psql":
+                quit_command = "\\q"
+                
+            result = self._run_async(self.runtime.run_in_session(
+                BashAction(
+                    command=quit_command,
+                    session_id=session_id,
+                    timeout=actual_timeout,
+                    is_interactive_quit=True
+                )
+            ))
+            
+            # Remove the interactive environment from the tracking dict
+            del self.interactive_environments[session_id]
+            
+            return {
+                "stdout": result.output,
+                "stderr": "",  # SWE-ReX combines stdout and stderr
+                "exit_code": result.exit_code,
+            }
+        except asyncio.TimeoutError:
+            # If we time out, assume the environment is still running
+            return {
+                "stdout": "",
+                "stderr": "Command timed out",
+                "exit_code": 124,  # Standard timeout exit code
+            }
+        except Exception as e:
+            # If we get an error, assume the environment is no longer running
+            if session_id in self.interactive_environments:
+                del self.interactive_environments[session_id]
+                
+            return {
+                "stdout": "",
+                "stderr": f"Error quitting interactive environment: {str(e)}",
+                "exit_code": 1,
+            }
 
     def read_file(self, file_path: Union[str, Path]) -> str:
         """
