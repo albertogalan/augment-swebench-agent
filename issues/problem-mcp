@@ -1,0 +1,7 @@
+[ADVICE]
+[GOAL]
+[PROBLEM]
+please detect which process is using 8086 and kill it
+
+[CONTEXT]
+[DOCUMENTATION ABOUT SWE-REX]

@@ -26,7 +26,7 @@ from prompts.instruction import INSTRUCTION_PROMPT
 ANTHROPIC_MAX_TOKENS = 32768
 DEEPSEEK_MAX_TOKENS = 8192
 OPENAI_MAX_TOKENS = 4096
-MAX_TURNS = 50
+MAX_TURNS = 100
 
 
 def main():
@@ -138,13 +138,15 @@ def main():
     # Set default model based on provider
     if args.model is None:
         if args.llm == "anthropic":
-            model_name = "claude-3-7-sonnet-20250219"
+            #model_name = "claude-3-7-sonnet-20250219"
+            model_name = "claude-3-5-sonnet-20240620"
         elif args.llm == "deepseek":
             model_name = "deepseek-chat"
         elif args.llm == "openai":
             model_name = "gpt-4o-2024-05-13"
         else:
-            model_name = "claude-3-7-sonnet-20250219"  # Default fallback
+            #model_name = "claude-3-7-sonnet-20250219"  # Default fallback
+            model_name = "claude-3-5-sonnet-20240620"
     else:
         model_name = args.model
 
