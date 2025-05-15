@@ -23,9 +23,10 @@ from utils.llm_client import get_client
 from prompts.instruction import INSTRUCTION_PROMPT
 
 # Default token limits for different LLM providers
-ANTHROPIC_MAX_TOKENS = 32768
+ANTHROPIC_MAX_TOKENS = 8192
 DEEPSEEK_MAX_TOKENS = 8192
 OPENAI_MAX_TOKENS = 4096
+GEMINI_MAX_TOKENS = 8192
 MAX_TURNS = 100
 
 
@@ -90,8 +91,8 @@ def main():
         "--llm",
         type=str,
         default="anthropic",
-        choices=["anthropic", "deepseek", "openai"],
-        help="LLM provider to use (anthropic, deepseek, or openai)",
+        choices=["anthropic", "deepseek", "openai", "gemini"],
+        help="LLM provider to use (anthropic, deepseek, openai, or gemini)",
     )
     parser.add_argument(
         "--model",
@@ -131,6 +132,10 @@ def main():
         print("Error: OPENAI_API_KEY environment variable is not set.")
         print("Please set it to your OpenAI API key.")
         sys.exit(1)
+    elif args.llm == "gemini" and "GEMINI_API_KEY" not in os.environ:
+        print("Error: GEMINI_API_KEY environment variable is not set.")
+        print("Please set it to your Google Gemini API key.")
+        sys.exit(1)
 
     # Initialize console
     console = Console()
@@ -138,15 +143,15 @@ def main():
     # Set default model based on provider
     if args.model is None:
         if args.llm == "anthropic":
-            #model_name = "claude-3-7-sonnet-20250219"
-            model_name = "claude-3-5-sonnet-20240620"
+            model_name = "claude-3-5-sonnet-20241022"
         elif args.llm == "deepseek":
-            model_name = "deepseek-chat"
+            model_name = "deepseek-coder-v2"
         elif args.llm == "openai":
             model_name = "gpt-4o-2024-05-13"
+        elif args.llm == "gemini":
+            model_name = "gemini-1.5-pro"
         else:
-            #model_name = "claude-3-7-sonnet-20250219"  # Default fallback
-            model_name = "claude-3-5-sonnet-20240620"
+            model_name = "claude-3-5-sonnet-20241022"  # Default fallback
     else:
         model_name = args.model
 
@@ -158,6 +163,8 @@ def main():
             max_tokens = DEEPSEEK_MAX_TOKENS
         elif args.llm == "openai":
             max_tokens = OPENAI_MAX_TOKENS
+        elif args.llm == "gemini":
+            max_tokens = GEMINI_MAX_TOKENS
         else:
             max_tokens = ANTHROPIC_MAX_TOKENS  # Default fallback
     else:
@@ -183,55 +190,87 @@ def main():
 
     # Initialize LLM client based on provider choice
     client = None
-    if args.llm == "anthropic":
-        client = get_client(
-            "anthropic-direct",
-            model_name=model_name,
-            use_caching=True,
-        )
-    elif args.llm == "deepseek":
-        try:
-            # Try to import from the module if installed
-            sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        if args.llm == "anthropic":
+            client = get_client(
+                "anthropic-direct",
+                model_name=model_name,
+                use_caching=True,
+            )
+        elif args.llm == "deepseek":
             try:
-                from deepseek_client import get_deepseek_client
-                client = get_deepseek_client(model_name=model_name)
-                logger_for_agent_logs.info(f"Using DeepSeek model: {model_name}")
-            except ImportError:
-                # Fall back to local import
-                import importlib.util
-                spec = importlib.util.spec_from_file_location("deepseek_client", "deepseek_client.py")
-                if spec is None or spec.loader is None:
-                    raise ImportError("Could not find deepseek_client.py")
-                deepseek_module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(deepseek_module)
-                client = deepseek_module.get_deepseek_client(model_name=model_name)
-                logger_for_agent_logs.info(f"Using DeepSeek model from local file: {model_name}")
-        except Exception as e:
-            logger_for_agent_logs.error(f"DeepSeek API error: {str(e)}")
-            console.print(f"[bold red]DeepSeek API error: {str(e)}[/bold red]")
-            console.print("[yellow]Using mock response for testing[/yellow]")
+                # Try to import from the module if installed
+                sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+                try:
+                    from deepseek_client import get_deepseek_client
+                    client = get_deepseek_client(model_name=model_name)
+                    logger_for_agent_logs.info(f"Using DeepSeek model: {model_name}")
+                except ImportError:
+                    # Fall back to local import
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("deepseek_client", "deepseek_client.py")
+                    if spec is None or spec.loader is None:
+                        raise ImportError("Could not find deepseek_client.py")
+                    deepseek_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(deepseek_module)
+                    client = deepseek_module.get_deepseek_client(model_name=model_name)
+                    logger_for_agent_logs.info(f"Using DeepSeek model from local file: {model_name}")
+            except Exception as e:
+                logger_for_agent_logs.error(f"DeepSeek API error: {str(e)}")
+                console.print(f"[bold red]DeepSeek API error: {str(e)}[/bold red]")
+                console.print("[yellow]Using mock response for testing[/yellow]")
 
-            # Create a simple mock client for testing
-            from utils.llm_client import LLMClient, TextResult
+                # Create a simple mock client for testing
+                from utils.llm_client import LLMClient, TextResult
 
-            class MockClient(LLMClient):
-                def generate(self, messages, max_tokens, system_prompt=None, temperature=0.0, tools=[], tool_choice=None, thinking_tokens=None):
-                    return [TextResult(text="This is a mock response for testing.")], {"tokens": 0}
+                class MockClient(LLMClient):
+                    def generate(self, messages, max_tokens, system_prompt=None, temperature=0.0, tools=[], tool_choice=None, thinking_tokens=None):
+                        return [TextResult(text="This is a mock response for testing.")], {"tokens": 0}
 
-            client = MockClient()
-    elif args.llm == "openai":
-        client = get_client(
-            "openai-direct",
-            model_name=model_name,
-        )
-    else:
-        # Default fallback to Anthropic
-        client = get_client(
-            "anthropic-direct",
-            model_name=model_name,
-            use_caching=True,
-        )
+                client = MockClient()
+        elif args.llm == "openai":
+            client = get_client(
+                "openai-direct",
+                model_name=model_name,
+            )
+        elif args.llm == "gemini":
+            # Make sure gemini_client.py is in the right place
+            try:
+                # Check if the file is in the root directory
+                if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "gemini_client.py")):
+                    console.print("[yellow]Note: gemini_client.py not found in the root directory.[/yellow]")
+
+                # First, install the google-generativeai package if not already installed
+                try:
+                    import google.generativeai
+                except ImportError:
+                    console.print("[yellow]Installing google-generativeai package...[/yellow]")
+                    import subprocess
+                    subprocess.check_call(
+                        [sys.executable, "-m", "pip", "install", "google-generativeai>=0.3.0"]
+                    )
+                    console.print("[green]Successfully installed google-generativeai package.[/green]")
+
+                # Now try to get the client
+                client = get_client(
+                    "gemini-direct",
+                    model_name=model_name,
+                )
+                logger_for_agent_logs.info(f"Using Gemini model: {model_name}")
+            except Exception as e:
+                logger_for_agent_logs.error(f"Gemini API error: {str(e)}")
+                console.print(f"[bold red]Gemini API error: {str(e)}[/bold red]")
+                sys.exit(1)
+        else:
+            # Default fallback to Anthropic
+            client = get_client(
+                "anthropic-direct",
+                model_name=model_name,
+                use_caching=True,
+            )
+    except Exception as e:
+        console.print(f"[bold red]Failed to initialize LLM client: {str(e)}[/bold red]")
+        sys.exit(1)
 
     if client is None:
         console.print(f"[bold red]Failed to initialize LLM client for {args.llm}[/bold red]")

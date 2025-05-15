@@ -1,8 +1,35 @@
-[ADVICE]
-[GOAL]
+
+
 [PROBLEM]
-[CONTEXT]
-[DOCUMENTATION ABOUT SWE-REX]
+
+check the plan-execution-road.md and to the following
+
+
+you need to rewrite code for human in loop process:
+
+Add the following options to setup configuration
+
+when model setup:
+- ask which provider do you want to use (deepseek, antrohophic, google)
+- ask type of embedding models ( explaining each one)
+- ask summary_llm
+- ask llm
+- ask how many papers do you have ( put range option )
+- ask folder of the paper ( default ~/Desktop/papers )
+- ask name of settings to save
+
+when agent setup:
+- ask select tools
+- ask select agent type (toolselector, simpleagent, memoryagent )
+- index settings name and concurrency
+- ask agent system prompot (select file from prompts folder )
+- ask name of setting to save
+
+
+once you create above make test for each
+
+
+
 [RULES]
 You have this rules to make the code
 

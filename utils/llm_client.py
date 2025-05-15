@@ -170,7 +170,7 @@ class DeepSeekDirectClient(LLMClient):
 
     def __init__(
         self,
-        model_name="deepseek-code",  # Update with appropriate DeepSeek model name
+        model_name="deepseek-coder-v2",  # Update with appropriate DeepSeek model name
         max_retries=2,
         thinking_tokens=None,
         use_caching=True,
@@ -418,7 +418,7 @@ class AnthropicDirectClient(LLMClient):
     def __init__(
         self,
         #model_name="claude-3-7-sonnet-20250219",
-        model_name="claude-3-5-sonnet-20240620",
+        model_name="claude-3-5-sonnet-20241022",
         max_retries=2,
         use_caching=True,
         use_low_qos_server: bool = False,
@@ -841,7 +841,7 @@ class OpenAIDirectClient(LLMClient):
 
         return augment_messages, message_metadata
 
-def get_client(client_name: str, **kwargs) -> LLMClient:
+def get_client(client_name: str, **kwargs) -> 'LLMClient':
     """Get a client for a given client name."""
     if client_name == "anthropic-direct":
         return AnthropicDirectClient(**kwargs)
@@ -855,5 +855,18 @@ def get_client(client_name: str, **kwargs) -> LLMClient:
         kwargs_copy = kwargs.copy()
         kwargs_copy.pop("thinking_tokens", None)
         return DeepSeekDirectClient(**kwargs_copy)
+    elif client_name == "gemini-direct":
+        # Dynamically import Gemini client to avoid circular imports
+        try:
+            # Import the client from the root directory, not from utils
+            import sys
+            import os
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from gemini_client import get_gemini_client
+            return get_gemini_client(**kwargs)
+        except ImportError as e:
+            print(f"Failed to import Gemini client: {e}")
+            print("Make sure 'gemini_client.py' is in the root directory and 'google-generativeai' is installed.")
+            raise
     else:
         raise ValueError(f"Unknown client name: {client_name}")
