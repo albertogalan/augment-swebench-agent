@@ -7,7 +7,7 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nas, prod]
 
     steps:
       - name: Checkout code
