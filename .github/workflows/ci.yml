@@ -7,7 +7,7 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: [self-hosted, Linux, X64, nas, prod]
+    runs-on: [self-hosted, Linux, X64, neovm]
 
     steps:
       - name: Checkout code
